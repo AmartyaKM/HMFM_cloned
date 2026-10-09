@@ -1,0 +1,11 @@
+# Setting compiler standard
+CXX_STD = CXX17
+NOCRANFLAGS = -Wno-attributes -Wno-ignored-attributes -Wno-deprecated-declarations
+
+
+# Setting Package Flags
+PKG_CXXFLAGS +=  $(shell "$(R_HOME)/bin$(R_ARCH)/Rscript.exe" -e "RcppParallel::CxxFlags()") \
+                 -D_REENTRANT -I'.' -fopenmp $(NOCRANFLAGS)
+PKG_LIBS = `$(R_HOME)/bin/Rscript -e "Rcpp:::LdFlags()"` \
+           `$(R_HOME)/bin/Rscript -e "RcppGSL:::LdFlags()"`
+PKG_LIBS += $(shell "$(R_HOME)/bin$(R_ARCH)/Rscript.exe" -e "RcppParallel::LdFlags()") -lz -fopenmp 

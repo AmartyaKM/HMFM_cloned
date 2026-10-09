@@ -1,8 +1,4 @@
-.Rproj.user
-.Rhistory
-.RData
-.Ruserdata
-/.idea/misc.xml
-/.idea/vcs.xml
-/.idea/GDFMM2.iml
-.ini
+*.o
+*.so
+*.dll
+*.ini

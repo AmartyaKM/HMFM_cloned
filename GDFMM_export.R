@@ -1,0 +1,1404 @@
+#### GDFMM FUNCTIONS ####
+
+# Here are collected all functions needed/usefull to run GDFMM Gibbs Sampler
+# and analyze its results
+
+#' sum_check : check if elements in a vector sum to an expected value. Elements of the vector
+#'             are supposed to be computed as expected_sum*p. If expectations are not respected
+#'             return a corrected version of vec, according to p
+#'
+#' @param vec vector to integer value to be checked
+#' @param expected_sum expected value for sum(vec)
+#' @param p theoretical weights applied to divide expected_sum in vec's elements
+#' @return corrected version of vec (if needed)
+sum_check <- function(vec, expected_sum, p){
+  if( !dplyr::near( sum(p), 1) )
+    stop("weights must sum to 1!")
+
+  round_diff = vec - expected_sum*p # large if value in vec is OVER-estimate
+
+  if(sum(vec) > expected_sum ){
+    i_max = which.max(round_diff)
+    vec[i_max] = vec[i_max] - 1
+    vec = sum_check(vec, expected_sum, p)
+  }
+  if(sum(vec) < expected_sum){
+    i_min = which.min(round_diff)
+    vec[i_min] = vec[i_min] + 1
+    vec = sum_check(vec, expected_sum, p)
+  }
+
+  return(vec)
+}
+
+
+#' point_density : compute the point estimate with credible intervals for density in
+#'                 in a point for a gaussian distribution and
+#'
+#' @param x point where density is computed
+#' @param mu_vec vector of mean for the gaussian distribution
+#'               extracted from posterior distribution of mu
+#' @param sigma_vec vector of standard deviation for the gaussian distribution
+#' @param alpha level of confidence
+#' @return c(inf, mean, sup) of point estimate of the density in x
+point_density <- function(x, mu_vec, sigma_vec, alpha = 0.05) {
+  estimated_density = mean(dnorm(x, mu_vec, sigma_vec))
+  err = sd(dnorm(x, mu_vec, sigma_vec))*qnorm(1-alpha/2)
+  ret = c(estimated_density - err, estimated_density, estimated_density + err)
+  return(ret)
+}
+
+#' dnorm_est : compute the point-wise estimate of the density for points in the given grid.
+#'             mu_vec e sigma_vec are respectively the vector of means and standard deviation
+#'             estimate for the gaussian distribution
+#'
+#' @param grid vector of point where I want to evaluate the density
+#' @param mu_vec vector of mean for the gaussian distribution
+#' @param sigma_vec vector of standard deviation for the gaussian distribution
+#' @param alpha level of confidence
+#' @return named matrix with (Inf, estimate, Sup)
+dnorm_est <- function(grid, mu_vec, sigma_vec, alpha = 0.05){
+  n = length(grid)
+  CI_vec = data.frame( "Inf." = numeric(n), "Est." = numeric(n), "Sup." = numeric(n))
+
+  for(i in 1:n){
+    CI_vec[i,] = point_density(grid[i], mu_vec, sigma_vec, alpha)
+  }
+
+  return(CI_vec)
+}
+
+#' dmix : density of a mixture of gaussian distributions
+#'
+#' @param x point or vector of values where I want to evaluate the density
+#' @param w vector of weights of the
+#' @param mu_vec vector of mean for the gaussian distribution
+#' @param sigma_vec vector of standard deviation for the gaussian distribution
+#' @return named matrix with (Inf, estimate, Sup)
+#' @export
+dmix <- function(x, w_j, mu_vec, sigma_vec){
+  if( !dplyr::near(sum(w_j), 1) )
+    stop("weigths don't sum to one")
+
+  if(length(w_j) != length(mu_vec) || length(w_j) != length(mu_vec) )
+    stop("length of w_j, mu_vec and sigma_vec differs")
+
+  K = length(w_j)
+
+  n = length(x)
+  mix_density = numeric(n)
+
+  for(k in 1:K){
+    mix_density = mix_density + w_j[k]*dnorm(x, mu_vec[k], sigma_vec[k])
+  }
+
+  return(mix_density)
+}
+
+
+#' rmix : function to extract a random sample of dimension n from a Gaussian mixture
+#'        defined by the 3 vectors p, mu, sigma (that must have same length!)
+#'
+#' @param n dimension of the random sample that has to be extracted
+#' @param p vector of weights for the components of the mixture
+#' @param mu vector of means for the components
+#' @param sigma vector of standard deviations for the components
+#' @return random sample derived my the specified mixture
+rmix <- function(n, p, mu, sigma){
+  if( !dplyr::near(sum(p),1) )
+    stop("weights for the components must sum to 1")
+
+  if( length(p) != length(mu) || length(p) != length(sigma) )
+    stop("number of weights for the components must agree with the dimensions of
+         mu's vector and sigma's vector AND *mu* and *sigma* must have
+         length")
+  # rnormm cannot take 0 weighted components ==> eliminate them
+  ind_0 = which( p == 0 )
+
+  if(length(ind_0) == 0){
+    sample_p = p
+    sample_mu = mu
+    sample_sigma = sigma
+  }else{
+    sample_p = p[-ind_0]
+    sample_mu = mu[-ind_0]
+    sample_sigma = sigma[-ind_0]
+  }
+
+  n_p = sapply(sample_p, function(x){round(x*n)})
+  n_p = sum_check(n_p, n, sample_p)
+  n_p = as.vector(n_p, mode = "integer")
+
+  mix_sample = numeric(n)
+  i = 1
+  M = length(sample_p)
+
+  for(m in 1:M){
+    ind_m = seq(i, i+n_p[m]-1)
+    mix_sample[ind_m] = rnorm(n_p[m], sample_mu[m], sample_sigma[m])
+    i = i + n_p[m]
+  }
+
+  # shuffle sampled values
+  mix_sample = mix_sample[sample(n)]
+
+  return( mix_sample )
+}
+
+#' arrange_partition
+#'
+#' This function takes as input a partition and fix it according to the notation used to define partitions in the sampler.
+#' @param partition [vector] the input partition.
+#' @return [vector] containing the partition following the requirement of the sampler.
+#' @export
+arrange_partition = function(partition){
+
+  num = sort(unique(partition)) #get passed indices
+  idx = seq(0, length(num)-1, by=1) #create sequence with correct indices
+
+  for(h in 1:length(num)){
+    if(num[h]!=idx[h])
+      partition[partition == num[h]] = idx[h]
+  }
+
+  # A possible way to do this operation using apply is
+  #apply(as.array(partition), MARGIN = 1, FUN = function(x){
+          #h = which(num == x)
+          #if(num[h]!=idx[h]) return (idx[h])
+          #else return (x)
+  #})
+  # but it looks more expensive to me
+  return (partition)
+}
+
+#' set_options
+#'
+#' Use this function to set up the options for the conditional Gibbs sampler.
+#' @param partition [vector] of length equal to the number of data. If \code{NULL}, all data points are put in the same cluster.
+#' @param Mstar0 [integer] the initial value of non-allocated components
+#' @param Lambda0 [double] the initial value for Lambda.
+#' @param gamma0 [vector] vector of initial values for the gamma parameters.
+#' @param mu0 [double] the mean parameter in the prior of mu.
+#' @param k0 [double] the parameter in the prior of mu.
+#' @param sigma0 [double] the rate parameter in the prior of sigma.
+#' @param nu0 [double] the shape parameter in the prior of sigma.
+#' @param beta0 [double] the prior mean for the regression coefficients.
+#' @param Sigma0 [double] the prior covariance matrix for the regression coefficients.
+#' @param IncludeCovariates [bool] set \code{TRUE} if covariates are provided.
+#' @param UseData [bool] set \code{FALSE} to sample from the prior.
+#' @param Adapt_MH_hyp1 [double] default is 0.7.
+#' @param Adapt_MH_hyp2 [double] default is 0.234.
+#' @param Adapt_MH_power_lim [double] default is 10.
+#' @param Adapt_MH_var0 [double] default is 1.
+#' @param proposal_Mstar [integer] must be strictly positive. The proposal distribution for Metropolis-Hasting update of Mstar is a discrete uniform
+#'        distribution between \code{-proposal_Mstar} and \code{proposal_Mstar}. 0 value is escluded.
+#' @param alpha_gamma [double] the shape parameter in the prior of gamma.
+#' @param beta_gamma [double] the rate parameter in the prior of gamma.
+#' @param alpha_lambda [double] the shape parameter in the prior of lambda.
+#' @param beta_lambda [double] the rate parameter in the prior of lambda.
+#' @param UpdateU [bool] set \code{TRUE} if U must be updated. Set \code{FALSE} to fix it to a common value.
+#' @param UpdateM [bool] set \code{TRUE} if Mstar must be updated. Set \code{FALSE} to fix it to a common value.
+#' @param UpdateGamma [bool] set \code{TRUE} if gamma must be updated. Set \code{FALSE} to fix it to a common value.
+#' @param UpdateS [bool] set \code{TRUE} if S must be updated. Set \code{FALSE} to fix it to a common value.
+#' @param UpdateTau [bool] set \code{TRUE} if tau must be updated. Set \code{FALSE} to fix it to a common value.
+#' @param UpdateLambda [bool] set \code{TRUE} if Lambda must be updated. Set \code{FALSE} to fix it to a common value.
+#' @param UpdateBeta [bool] set \code{TRUE} if Beta must be updated. Set \code{FALSE} to fix it to a common value.
+#'
+#' @export
+set_options = function( partition = NULL, Mstar0 = 2,
+                        Lambda0 = 3, mu0 = 0, sigma0 = 1, gamma0 = NULL,
+                        beta0 = c(0,0), Sigma0 = 10*diag(2),
+                        IncludeCovariates = FALSE,
+                        UseData = TRUE,
+                        Adapt_MH_hyp1 = 0.7,Adapt_MH_hyp2 = 0.234, Adapt_MH_power_lim = 10, Adapt_MH_var0=1,
+                        proposal_Mstar = 1,
+                        k0 = 1/10, nu0 = 10, alpha_gamma = 1, beta_gamma = 1, alpha_lambda = 1, beta_lambda = 1,
+                        init_mean_cluster = NULL, init_var_cluster = NULL,
+                        UpdateU = T, UpdateM = T, UpdateGamma = T, UpdateS = T, UpdateTau = T, UpdateLambda = T, UpdateBeta = F
+)
+{
+  option<-list("Mstar0" = Mstar0, "Lambda0" = Lambda0, "mu0" = mu0,"sigma0"= sigma0, "gamma0" = gamma0,
+                "beta0" = beta0, "Sigma0" = Sigma0, "IncludeCovariates" = IncludeCovariates, "UseData" = UseData,
+               "Adapt_MH_hyp1"= Adapt_MH_hyp1,"Adapt_MH_hyp2"= Adapt_MH_hyp2, "Adapt_MH_power_lim"=Adapt_MH_power_lim, "Adapt_MH_var0"=Adapt_MH_var0,
+               "proposal_Mstar" = proposal_Mstar,
+               "k0"= k0, "nu0"=nu0, "alpha_gamma"=alpha_gamma,
+               "beta_gamma"=beta_gamma, "alpha_lambda"=alpha_lambda, "beta_lambda"=beta_lambda,
+               "init_mean_cluster" = init_mean_cluster, "init_var_cluster" = init_var_cluster,
+               "UpdateU" = UpdateU, "UpdateM" = UpdateM, "UpdateGamma" = UpdateGamma, "UpdateS" = UpdateS,
+               "UpdateTau" = UpdateTau, "UpdateLambda" = UpdateLambda, "UpdateBeta" = UpdateBeta, "partition" = partition
+  )
+  return (option)
+}
+
+#' GDFMM Gibbs Sampler: function to run the GDFMM model. There is the possibility to fix
+#'                      the partition, passing TRUE to FixPartition and specifying the
+#'                      partion in the option. Default prior for P0 is an inverse gamma
+#'
+#' @param data input data
+#' @param niter number of iterations
+#' @param burnin burnin period
+#' @param thin thinning value
+#' @param seed seed for GSL random engine (0 ==> random seed)
+#' @param P0.prior string with the prior to be used as P0
+#' @param FixPartition TRUE if we want to fix the partition
+#' @param option the output of \code{\link{set_options}} function
+#' @return results of Gibbs Sampler
+#' @export
+GDFMM_sampler <- function(data, niter, burnin, thin, seed,
+                            P0.prior = "Normal-InvGamma", FixPartition = F, option = NULL) {
+
+  n = ncol(data)*nrow(data) - sum(is.na(data)) #get number of data points
+  d = nrow(data)
+  #Check option to be in the correct form
+  option_temp = set_options(partition = NULL)
+  if(is.null(option)) # no option, set default
+    option = option_temp
+
+  if(length(option) != length(option_temp))
+    stop("option parameter is malformed. Its length is not the expected one. Use set_options() function to set it correctely.")
+  if(!all(names(option) == names(option_temp) ))
+    stop("option parameter is malformed. The names are not the expected ones. Use set_options() function to set them correctely.")
+
+  #Check partiton
+  if(is.null(option$partition)){ # set empty partition
+    if(FixPartition)
+        stop("If FixPartition is selected, a partition must be provided in option$partition")
+    option$partition = rep(0,n)
+  }else{
+    cat("\n Check that provided partition is well formed. It must start from 0 and all values must be contiguous \n")
+    option$partition = arrange_partition(option$partition)
+
+    # check that partiton and data are coherent
+    if(n != length(option$partition))
+      stop("The number of points in the data is not coherent with the length of the partition. Are there missing values in the data? Such implementation is not able to deal with them")
+  }
+
+  # Check initial values for gamma0
+  if(is.null(option$gamma0))
+    option$gamma0 = rep(1,d)
+  if(length(option$gamma0) != d)
+    stop("option$gamma0 must be a vector of length d")
+  if(any(option$gamma0 <= 0 ))
+    stop("All elements of option$gamma0 must be strictly positive")
+
+  # Check initial values for tau
+  K_init = length(table(option$partition)) # compute initial number of clusters
+  if(is.null(option$init_var_cluster))
+    option$init_var_cluster = rgamma(n=K_init+option$Mstar0,
+                                     shape = option$nu0/2,
+                                     rate  = option$nu0*option$sigma0/2 )
+  if(length(option$init_var_cluster)!=K_init+option$Mstar0)
+    stop("The length of option$init_var_cluster must be equal to the initial number of clusters deduced from the initial partition plus Mstar0 ")
+  if(is.null(option$init_mean_cluster))
+    option$init_mean_cluster = rnorm(n=K_init+option$Mstar0,
+                                     option$mu0, sqrt(option$init_var_cluster/option$k0))
+  if(length(option$init_mean_cluster)!=K_init+option$Mstar0)
+    stop("The length of option$init_mean_cluster must be equal to the initial number of clusters deduced from the initial partition plus Mstar0")
+
+  # Check proposal for Mstar
+  option$proposal_Mstar = floor(option$proposal_Mstar)
+  if(option$proposal_Mstar <= 0)
+    stop("proposal_Mstar must be a strictly positive integer")
+
+
+  #if( any(is.na(data)) )
+    #stop("There are nan in data") --> per come sto passando i dati non posso fare questo controllo. malissimo in ottica missing data
+
+ # //sigma[m] =  1 / Gamma(gs_engine, nu0/2, 2 / (nu0*sigma0));
+ #  //mu[m] = rnorm(gs_engine, mu0, sqrt(sigma[m]));
+
+
+  return( GDFMM:::GDFMM_sampler_c(data, niter, burnin, thin, seed, P0.prior, FixPartition, option))
+}
+
+
+
+#' p_distinct_prior
+#'
+#' This function computes the a priori probability that the number of distinct species is equal to \code{k}.
+#' @param k integer, the number of distinct species whose probability has to be computed.
+#' @param n_j an positive integer in the case of exchangeable data or a vector of size \code{d} in the case of partially exchangeable data.
+#' @param gamma real valued, it must be of the same size of \code{n_j}
+#' @param prior a string that indicates the type of prior to be used for the number of components. It can only be equal to \code{"Poisson"} or \code{"NegativeBinomial"}.
+#' @param ... the addition parameters to be used in the prior. Use \code{lambda} for the "Poisson"case (must be strictly positive) and \code{r} (positive integer) and \code{p} (real in (0,1)) for the "NegativeBinomial" case.
+#'
+#' @export
+p_distinct_prior = function(k,n_j, gamma, prior = "Poisson", ..., Max_iter = 100){
+  l = list(...)
+  L = length(l)
+
+  #checks
+  if(length(n_j)!=length(gamma))
+    stop("The length of n_j must be equal to the length of gamma")
+  if( any(n_j<0) || any(gamma<=0) )
+    stop("The elements of n_j must the non negative and the elements of gamma must be strictly positive")
+  if(Max_iter<=0)
+    stop("The number of iterations must be strictly positive")
+
+  # read prior parameters
+  prior_params = list("lambda" = -1, "r" = -1, "p" = -1)
+  if(prior == "Poisson"){
+    if(L!=1)
+      stop("Error when reading the prior parameters: when prior is Poisson, only one parameter expected ")
+    if(! names(l)=="lambda")
+      stop("Error when reading the prior parameters: when prior is Poisson, only one parameter named lambda is expected. The name must be passed explicitely ")
+
+    prior_params$lambda = l$lambda
+  }
+  else if(prior == "NegativeBinomial"){
+    if(L!=2)
+      stop("Error when reading the prior parameters: when prior is NegativeBinomial, exactly two parameters expected ")
+    if( !any(! names(l) %in% names(prior_params)) )  #check names
+      stop("Error when reading the prior parameters: when prior is NegativeBinomial, exactly one parameters named r and p are expected. The names must be passed explicitely ")
+
+    prior_params$r = l$r
+    prior_params$p = l$p
+  }
+  else
+    stop("prior can only be equal to Poisson or NegativeBinomial")
+
+  # Check trivial cases
+  if(k<0)
+    stop("Error, the number of distinct species k can not be negative")
+  if(k==0)
+    return (0)
+  if(k > sum(n_j))
+    return (0)
+
+  # Compute non trivial cases
+  return (  p_distinct_prior_c(k,n_j,gamma,prior,prior_params,Max_iter)  )
+}
+
+
+
+
+#' genera_mix_gas
+#'
+#' This function generate a random sample from a mixture of uni-dimensional Gaussian distributed random variables.
+#'
+#' @param n [integer] the number of points to be generated.
+#' @param pro [vector] the mixture proportions. Its length must be equal to the one of \code{means} and \code{sds}.
+#' @param means [vector] the centers of the mixture componentes. Its length must be equal to the one of \code{pro} and \code{sds}.
+#' @param sds [vector] the standard deviations of the mixture componentes. Its length must be equal to the one of \code{pro} and \code{means}.
+#' @return [list] with a vector named \code{y} containing the sampled values and a vector named \code{clu} with the cluster membership of each data point.
+#' @export
+genera_mix_gas <- function(n = 200, pro=c(0.5,0.5), means = c(-1,1), sds=sqrt(c(1,1))){
+    p <- length(pro)
+    if(length(means)!=p){stop("The number of component do not coincides with the number of means components")}
+    if(length(sds)!=p){stop("The number of component do not coincides with the number of standard deviation components")}
+
+    y <- vector(length=n)
+    clu <- vector(length=n)
+
+    for(i in 1:n){
+      cmp <- sample(1:p,1,prob=pro)
+
+      y[i]=rnorm(1,mean=means[cmp],sd=sds[cmp])
+      clu[i] <- cmp
+    }
+
+    return(list(y=y,clu=clu))
+}
+
+
+#' pred_uninorm: this is the old version
+#'
+pred_uninorm <- function(idx_group, grid, fit){
+
+    n_iter <- length(fit$K) #number of iterations
+    l_grid <- length(grid)
+    MIX    <- matrix(0, nrow=n_iter, ncol=l_grid)
+
+    # This loop computes the predictive
+    for(it in 1:n_iter){
+
+      # Get sampled values
+      M_it <- fit$K[it] + fit$Mstar[it] # compute the number of components (allocated or not)
+      S_it = fit$S[[it]][idx_group,]    # get (S_{j,1}^(it), ..., S_{j,M}^(it)), where j is idx_group and M is M_it
+      T_it = sum(S_it)                  # compute the sum of the vector above
+      mu_it   <- fit$mu[[it]]           # get the mean, (mu_{1}^{(it)}, ..., mu_{M}^{(it)})
+      sig2_it <- fit$sigma[[it]]        # get the variances, (sigma^2_{1}^{(it)}, ..., sigma^2_{M}^{(it)})
+
+      # XX is a l_grid x M_it matrix, it contains the Normal kernels evauated over the grid
+      # XX[i,m] = Norm(grid[i] | mu_{m}^{(it)}, sigma^2_{m}^{(it)})
+      XX = t(sapply(1:M_it, simplify = "matrix",
+                    function(m){
+                      dnorm( x = grid, mean=mu_it[m], sd=sqrt(sig2_it[m]) )
+                    }
+            ))
+      # XX <- matrix(ncol=l_grid,nrow=M_it)
+      # for(m in 1:M_it){ XX[m,] <- dnorm(grid,mean=mu_it[m],sd=sqrt(sig2_it[m]))}
+
+      # Compute predicted density at iteration it
+      MIX[it,] <- (S_it/T_it) %*% XX
+    }
+
+    # Density estimation and credible bounds
+    pred_est <- apply(MIX,2,quantile,prob=c(0.025,0.5,0.975))
+    return(pred_est)
+}
+
+
+#' predictive
+#'
+#' This function computes the predictive distribution for group \code{idx_group} generated from the \code{\link{GDFMM_sampler}} or \code{\link{ConditionalSampler}}
+#' @param idx_group [integer] the index of the group of interest.
+#' @param grid [vector] a grid where the normal kernel is evaluated.
+#' @param fit [list] the output of a conditional sampler, \code{\link{GDFMM_sampler}} or \code{\link{ConditionalSampler}}
+#' @param burnin [integer] the number of draws from \code{\link{GDFMM_sampler}} that must be discarded.
+#'
+#' @return [matrix] of size \code{n x length(grid)} containing the quantiles of level \code{0.025,0.5,0.975}.
+#' @export
+predictive <- function(idx_group, grid, fit, burnin = 1){
+    n_iter <- length(fit$mu) #number of iterations
+    l_grid <- length(grid)
+                            #MIX    <- matrix(0, nrow=n_iter, ncol=l_grid)
+                            # MIX is a n_iter x l_grid matrix
+
+    # This loop computes the predictive
+    MIX = t(sapply(burnin:n_iter, simplify = "matrix",
+                    function(it){
+                      # Get sampled values
+                      M_it  = length(fit$mu[[it]]) # compute the number of components (allocated or not)
+                      #M_it <- fit$K[it] + fit$Mstar[it] # compute the number of components (allocated or not)
+                      S_it = fit$S[[it]][idx_group,]    # get (S_{j,1}^(it), ..., S_{j,M}^(it)), where j is idx_group and M is M_it
+                      T_it = sum(S_it)                  # compute the sum of the vector above
+                      mu_it   <- fit$mu[[it]]           # get the mean, (mu_{1}^{(it)}, ..., mu_{M}^{(it)})
+                      sig2_it <- fit$sigma[[it]]        # get the variances, (sigma^2_{1}^{(it)}, ..., sigma^2_{M}^{(it)})
+
+                      # XX is a l_grid x M_it matrix, it contains the Normal kernels evauated over the grid
+                      # XX[i,m] = Norm(grid[i] | mu_{m}^{(it)}, sigma^2_{m}^{(it)})
+                      XX = t(sapply(1:M_it, simplify = "matrix",
+                                    function(m){
+                                      dnorm( x = grid, mean=mu_it[m], sd=sqrt(sig2_it[m]) ) # returns a vector of length equal to l_grid
+                                    }
+                                  ))
+                      # Compute predicted density at iteration it
+                      (S_it/T_it) %*% XX
+                    }
+                ))
+
+
+    # Density estimation and credible bounds
+    pred_est <- apply(MIX,2,quantile,prob=c(0.025,0.5,0.975))
+    return(pred_est)
+}
+
+#' predictive_all_groups
+#'
+#' This function computes the predictive distribution for all groups generated from the \code{\link{GDFMM_sampler}}.
+#' @inheritParams predictive
+#' @return [list] of length \code{d} where each element is the return object of \code{\link{predictive}}.
+#' @export
+predictive_all_groups <- function(grid, fit, burnin = 1){
+  d = nrow(fit$gamma)
+  lapply(1:d, predictive, grid = grid, fit = fit, burnin = burnin)
+}
+
+#' simulate_data
+#'
+#' This function generate data to be used in the \code{\link{GDFMM_sampler}} or \code{\link{GDFMM_marginal_sampler}}.
+#' It gets the number of levels, the data to be generated in each level and, within each level, it samples from the mixture defined by \code{K}, \code{mu}, \code{sd} with
+#' weights defined in \code{prob}, which may vary in different levels
+#' @inheritParams generate_data
+#' @param prob [matrix] of dimension \code{d x K} where each row contains the weights for the mixture model in each level. Some may be zero.
+#' @return [list] with a matrix of size \code{d x max(n_j)} named \code{data} containing the data to be fed to \code{\link{GDFMM_sampler}}
+#' and a vector named \code{real_partition} with the cluster membership of each data point.
+#' @export
+simulate_data <- function(d, K = 3, prob=NULL, mu= c(-20,0,20), sd = c(1,1,1), n_j = rep(200, d), seed = 124123 )
+{
+
+  set.seed(seed)
+  if(length(mu) != K || length(sd) != K ) stop("The length of mu and sd must be equal to K")
+  if(length(n_j) != d ) stop("The length of n_j must be equal to d")
+  if(is.null(prob)){ # set equal weights
+    prob = matrix(1/K,nrow = d,ncol= K)
+  }
+
+  n = sum(n_j) #total number of data points
+
+  # used to save the number of generated clusters in each level
+  #Kgruppo = apply(prob, MARGIN = 1, FUN = function(level_probs){sum(level_probs>0)})
+  # used to state what components are used to generate data in each level
+  #componenti_gruppo = vector("list",length = d)
+
+  data = matrix(NA, nrow = d, ncol = max(n_j))     # d x max(n_j) matrix
+  #cluster = matrix(NA, nrow = d, ncol = max(n_j))  # d x max(n_j) matrix
+  real_partition = c()      # real_partition is a vector of length sum(n_j), it collects all the group membership.
+  # values are collected level by level, so first all the values in level 1, the all values in level 2 and so on
+
+  for(j in 1:d){
+
+    #componenti_gruppo[[j]] = which(prob[j,]>0)
+    #p[j,1:Kgruppo[j]] = prob[j,]
+    #p[j,1:Kgruppo[j]] = rep(1/Kgruppo[j], Kgruppo[j]) # set the weights all equals
+
+    # generate mixture in level j
+    temp = genera_mix_gas(n = n_j[j], pro = prob[j,], means = mu, sds = sd )
+
+    # save data
+    data[j, 1:n_j[j]] = temp$y
+
+    # save clustering
+    #cluster[j, 1:n_j[j]] = temp$clu
+    #cluster[j, 1:n_j[j]] = unlist(lapply(1:n_j[j], function(h){componenti_gruppo[[j]][temp$clu[h]]}))
+    #real_partition = c(real_partition, cluster[j, 1:n_j[j]])
+    real_partition = c(real_partition, temp$clu )
+  }
+  # In real partition devo avere valore da 0 a K senza buchi. Per esempio, se ho solo 0 e 2 non va bene!
+  # quella che viene modificata dentro il sampler è
+  # partion_within_sampler = arrange_partition(real_partition)
+  return( list(data = data, real_partition = real_partition) )
+}
+
+#' predictive_new_group
+#'
+#' This function computes the predictive distribution for group \code{d+1} that has not been observed.
+#' @inheritParams predictive
+#' @inheritParams set_options
+#'
+#' @return [matrix] of size \code{n x length(grid)} containing the quantiles of level \code{0.025,0.5,0.975}.
+predictive_new_group <- function(grid, fit, burnin = 1, alpha_gamma, beta_gamma){
+    n_iter <- length(fit$mu) #number of iterations
+    l_grid <- length(grid)
+                            #MIX    <- matrix(0, nrow=n_iter, ncol=l_grid)
+                            # MIX is a n_iter x l_grid matrix
+
+    # This loop computes the predictive
+    MIX = t(sapply(burnin:n_iter, simplify = "matrix",
+                    function(it){
+                      # Get sampled values
+                      M_it  = length(fit$mu[[it]]) # compute the number of components (allocated or not)
+                      mu_it   <- fit$mu[[it]]           # get the mean, (mu_{1}^{(it)}, ..., mu_{M}^{(it)})
+                      sig2_it <- fit$sigma[[it]]        # get the variances, (sigma^2_{1}^{(it)}, ..., sigma^2_{M}^{(it)})
+                      gamma_new_it <- rgamma(n=1,shape=alpha_gamma,rate=beta_gamma) # draw gamma_d+1 from the prior
+                      S_new_it <- rgamma(n=M_it, shape = gamma_new_it, rate = 1) # draw unnormalized weights from the prior
+                      T_new_it <- sum(S_new_it) # needed to normalize the weigths
+
+                      # Important remark. If alpha_gamma and beta_gamma are too small, it is possible that the sampled gamma is
+                      # so close to zero that T is barely equal to 0.
+                      if(T_new_it < 1e-8)
+                        w_it = rep(0,M_it)
+                      else
+                        w_it = S_new_it/T_new_it  # get normalized weights
+                      # XX is a l_grid x M_it matrix, it contains the Normal kernels evauated over the grid
+                      # XX[i,m] = Norm(grid[i] | mu_{m}^{(it)}, sigma^2_{m}^{(it)})
+                      XX = t(sapply(1:M_it, simplify = "matrix",
+                                    function(m){
+                                      dnorm( x = grid, mean=mu_it[m], sd=sqrt(sig2_it[m]) ) # returns a vector of length equal to l_grid
+                                    }
+                                  ))
+                      if(any(is.na(XX))){
+                        stop('Trovato NAN in XX')
+                      }
+                      # Compute predicted density at iteration it
+                      w_it %*% XX
+                    }
+                ))
+
+
+    # Density estimation and credible bounds
+    pred_est <- apply(MIX,2,quantile,prob=c(0.025,0.5,0.975))
+    return(pred_est)
+}
+
+
+
+#' set_options_marginal
+#'
+#' Use this function to set up the options for the conditional Gibbs sampler.
+#' @param partition [vector] of length equal to the number of data. If \code{NULL}, all data points are put in the same cluster.
+#' @param Lambda0 [double] the initial value for Lambda.
+#' @param gamma0 [vector] of initial values for the gamma parameters.
+#' @param mu0 [double] the mean parameter in the prior of mu.
+#' @param k0 [double] the parameter in the prior of mu.
+#' @param sigma0 [double] the rate parameter in the prior of sigma.
+#' @param nu0 [double] the shape parameter in the prior of sigma.
+#' @param UseData [bool] set \code{FALSE} to sample from the prior.
+#' @param Adapt_MH_hyp1 [double] default is 0.7.
+#' @param Adapt_MH_hyp2 [double] default is 0.234.
+#' @param alpha_gamma [double] the shape parameter in the prior of gamma.
+#' @param beta_gamma [double] the rate parameter in the prior of gamma.
+#' @param alpha_lambda [double] the shape parameter in the prior of lambda.
+#' @param beta_lambda [double] the rate parameter in the prior of lambda.
+#' @param UpdateU [bool] set \code{TRUE} if U must be updated. Set \code{FALSE} to fix it to a common value.
+#' @param UpdateGamma [bool] set \code{TRUE} if gamma must be updated. Set \code{FALSE} to fix it to a common value.
+#' @param UpdateTau [bool] set \code{TRUE} if tau must be updated. Set \code{FALSE} to fix it to a common value.
+#' @param UpdateLambda [bool] set \code{TRUE} if Lambda must be updated. Set \code{FALSE} to fix it to a common value.
+#'
+#' @export
+set_options_marginal = function( partition = NULL,
+                        Lambda0 = 3, mu0 = 0, sigma0 = 1, gamma0 = NULL,
+                        UseData = TRUE,
+                        Adapt_MH_hyp1 = 0.7,Adapt_MH_hyp2 = 0.234,
+                        sp_mala_U = 0.01, sp_mala_gamma=0.01,
+                        k0 = 1/10, nu0 = 10, alpha_gamma = 1, beta_gamma = 1, alpha_lambda = 1, beta_lambda = 1,
+                        init_mean_cluster = NULL, init_var_cluster = NULL,
+                        UpdateU = T, UpdateGamma = T, UpdateTau = T, UpdateLambda = T
+                      )
+{
+  option<-list("Lambda0" = Lambda0, "mu0" = mu0,"sigma0"= sigma0, "gamma0" = gamma0,
+               "UseData" = UseData,
+               "Adapt_MH_hyp1"= Adapt_MH_hyp1,"Adapt_MH_hyp2"= Adapt_MH_hyp2,
+               "sp_mala_U"=sp_mala_U,"sp_mala_gamma"=sp_mala_gamma,
+               "k0"= k0, "nu0"=nu0, "alpha_gamma"=alpha_gamma,
+               "beta_gamma"=beta_gamma, "alpha_lambda"=alpha_lambda, "beta_lambda"=beta_lambda,
+               "init_mean_cluster" = init_mean_cluster, "init_var_cluster" = init_var_cluster,
+               "UpdateU" = UpdateU, "UpdateGamma" = UpdateGamma,
+               "UpdateTau" = UpdateTau, "UpdateLambda" = UpdateLambda, "partition" = partition
+              )
+  return (option)
+}
+
+#' GDFMM Marginal Gibbs Sampler:
+#'
+#' function to run the GDFMM marginal Gibbs Sampler. There is the possibility to fix
+#' the partition, passing TRUE to FixPartition and specifying the
+#' partion in the option. Default prior for P0 is an inverse gamma
+#'
+#' @param data input data
+#' @param niter number of iterations
+#' @param burnin burnin period
+#' @param thin thinning value
+#' @param seed seed for GSL random engine (0 is for random seed)
+#' @param P0.prior string with the prior to be used as P0
+#' @param FixPartition TRUE if we want to fix the partition
+#' @param option the output of \code{\link{set_options_marginal}} function
+#' @return results of Gibbs Sampler
+#' @export
+GDFMM_marginal_sampler <- function( data, niter, burnin, thin, seed,
+                                    P0.prior = "Normal-InvGamma", FixPartition = F, option = NULL)
+{
+
+  n = ncol(data)*nrow(data) - sum(is.na(data)) #get number of data points
+  d = nrow(data)
+
+  #Check option to be in the correct form
+  option_temp = set_options_marginal(partition = NULL)
+  if(is.null(option)) # no option, set default
+    option = option_temp
+
+  if(length(option) != length(option_temp))
+    stop("option parameter is malformed. Its length is not the expected one. Use set_options() function to set it correctely.")
+  if(!all(names(option) == names(option_temp) ))
+    stop("option parameter is malformed. The names are not the expected ones. Use set_options() function to set them correctely.")
+
+  #Check partiton
+  if(is.null(option$partition)){ # set empty partition
+    if(FixPartition)
+        stop("If FixPartition is selected, a partition must be provided in option$partition")
+    option$partition = rep(0,n)
+  }else{
+    cat("\n Check that provided partition is well formed. It must start from 0 and all values must be contiguous \n")
+    option$partition = arrange_partition(option$partition)
+
+    # check that partiton and data are coherent
+    if(n != length(option$partition))
+      stop("The number of points in the data is not coherent with the length of the partition. Are there missing values in the data? Such implementation is not able to deal with them")
+  }
+  # Check initial values for gamma0
+  if(is.null(option$gamma0))
+    option$gamma0 = rep(1,d)
+  if(length(option$gamma0) != d)
+    stop("option$gamma0 must be a vector of length d")
+  if(any(option$gamma0 <= 0 ))
+    stop("All elements of option$gamma0 must be strictly positive")
+
+  # Check initial values for tau
+  K_init = length(table(option$partition)) # compute initial number of clusters
+  if(is.null(option$init_var_cluster))
+    option$init_var_cluster = rgamma(n=K_init,
+                                     shape = option$nu0/2,
+                                     rate  = option$nu0*option$sigma0/2 )
+  if(length(option$init_var_cluster)!=K_init)
+    stop("The length of option$init_var_cluster must be equal to the initial number of clusters deduced from the initial partition ")
+  if(is.null(option$init_mean_cluster))
+    option$init_mean_cluster = rnorm(n=K_init,
+                                     option$mu0, sqrt(option$init_var_cluster/option$k0))
+  if(length(option$init_mean_cluster)!=K_init)
+    stop("The length of option$init_mean_cluster must be equal to the initial number of clusters deduced from the initial partition ")
+
+  #if( any(is.na(data)) )
+    #stop("There are nan in data") --> per come sto passando i dati non posso fare questo controllo. malissimo in ottica missing data
+
+
+
+
+  return( GDFMM:::GDFMM_marginal_sampler_c(data, niter, burnin, thin, seed, P0.prior, FixPartition, option))
+}
+
+
+#' empirical_bayes_normalinvgamma
+#'
+#' function to set normal-inversegamma parameters. If \code{data} is not \code{NULL}, an empirical bayes procedure
+#' is automatically applied by setting \code{barmu = mean(data)}, \code{barsig2 = var(as.vector(data))/3}
+#' \code{varmu} and \code{varsig2} are not set using \code{data}
+#' @param data [matrix] input data.
+#' @param barmu [scalar] desired value of the marginal mean of the normally distribuited parameter. Used only if \code{data} is \code{NULL}.
+#' @param varmu [scalar] desired value of the marginal variance of the normally distribuited parameter
+#' @param barsig2 [scalar] desired value of the mean of the inverse-gamma distribuited parameter. Used only if \code{data} is \code{NULL}.
+#' @param varsig2 [scalar] desired value of the variance of the inverse-gamma distribuited parameter
+#' @param correction [scalar] if \code{data} are provided, the expected value of \code{sigma} is set equal to \code{var(data)/correction}.
+empirical_bayes_normalinvgamma <- function( data = NULL, barmu = 0, varmu = 1, barsig2 = 10, varsig2 = 5, correction = 3  )
+{
+  if(!is.null(data)){
+    barmu   = mean(data, na.rm = T)
+    barsig2 = var(as.vector(data), na.rm = T) / correction
+  }
+  # Initialize return value
+  res = list("mu0" = 0, "sigma0"= 1.0, "k0" = 1.0, "nu0" = 10 )
+
+  # Compute useful quantities
+  sum_barsig2_varsig2 = barsig2*barsig2 + varsig2
+  sum_barsig2_2varsig2 = barsig2*barsig2 + 2*varsig2
+
+  # Compute nu0
+  res$nu0 = 2*( barsig2*barsig2/varsig2 + 2 )
+
+  # Compute sigma0^2
+  res$sigma0 = (sum_barsig2_varsig2/sum_barsig2_2varsig2) * barsig2
+
+  # Compute mu0
+  res$mu0 = barmu
+
+  # Compute k0
+  res$k0 = barsig2/varmu
+
+  return(res)
+
+}
+
+#' data_mat2list
+#'
+#' function to transform the data matrix in long form in a list of vectors form.
+#' @param data [matrix] input data in long form
+#' @export
+data_mat2list <- function( data )
+{
+  library(tidyverse)
+  data = as_tibble(data) %>% mutate(level = as.factor(V1), index = as.integer(V2), value = as.double(V3)) %>%
+         select(level,index,value)
+
+  d = length(unique(data$level)) #get number of levels
+  data_list = vector("list",length = d) #initialize list for data
+  n_j = vector("numeric",length = d)
+  for(j in 1:d){ #for each level
+    data_nj = data %>% filter(level == j) # filter data in level j
+    n_j[j] = nrow(data_nj) # compute number of data in each level
+    data_list[[j]] = data_nj$value # fill the list of vectors
+  }
+  res = list("data" = data_list,
+             "d" = d,
+             "n_j" = n_j)
+
+  return(res)
+}
+
+
+#' Non Central Student t - Density
+#'
+#' @param n0 the degree of fredoom.
+#' @param mu0 the location parameter.
+#' @param gamma0 the scale parameter.
+#' @return scalar representing the evaluation of the density at x
+#' @export
+dnct = function( x, n0, mu0, gamma0 )
+{
+  if(gamma0 <= 0)
+    stop("The scale parameter has to be strictly positive.")
+  return( 1/gamma0 * dt(x = (x-mu0)/gamma0, df = n0 ) )
+}
+
+
+#' log_stable_sum
+#'
+#' This functions computes log(sum_i(a_i)) using a stable formula for log values. Let us denote a* to the the maximum value of vector a which is attained when i = i*.
+#' \eqn{log(sum_i(a_i)) = log(a*) + log[ 1 + sum_{i not i*}(exp{log(a_i) - log(a*)}) ]}
+#' See that only the logarithm of the elements of a are needed. Hence, it is likely that one has already computed them in log scale. If so, set is_log = T
+#' @param a [vector] vector whose values must be summed.
+#' @param is_log [bool] states if elements of a are already in log scale or not. If not, elements of a must be strictly positive.
+#' @export
+log_stable_sum = function(a, is_log = T)
+{
+
+  # Check vector length
+  if(length(a) == 0)
+    return (0.0)
+
+  # Compute log of each element. They must be positve
+  if(!is_log) {
+    if(any(a<0))
+      stop("Elements of a must be positive.")
+    a = log(a)
+  }
+
+  # Find the maximum
+  a_star = max(a)
+
+  # Handle degenerate case
+  if(a_star == -Inf)
+    return (-Inf)
+
+  # Compute log stable sum formula
+  return(  a_star + log(sum( exp(a - a_star) ))   )
+}
+
+
+#' predictive_marginal
+#'
+#' This function computes the predictive distribution for group \code{idx_group} generated from the \code{\link{GDFMM_marginal_sampler}}.
+#' @inheritParams predictive
+#' @param option [list] the output of \code{\link{set_options_marginal}} function used to fit \code{\link{GDFMM_marginal_sampler}}.
+#'
+#' @return [matrix] of size \code{n x length(grid)} containing the quantiles of level \code{0.025,0.5,0.975}.
+#' @export
+predictive_marginal <- function(idx_group, grid, fit, option, burnin = 0)
+{
+
+  n_iter <- length(fit$K) #number of iterations
+  n_save <- n_iter - burnin #number of saved iterations to take into account. The first burnin must be discarded
+  l_grid <- length(grid)  #length of the grid
+  MIX    <- matrix(0, nrow=n_save, ncol=l_grid)
+
+
+  # Prior_grid is a vector of length l_grid, it contains the marginal prior evauated over the grid
+  # Prior_grid[i] = nct(grid[i] | dof = nu0, loc = mu0, scale = sqrt(k0/(k0+1)*sigma0) ), where nct is the non-central student-t distribution
+  #scale = sqrt( (option$k0)/(option$k0 + 1) * option$sigma0 )
+  scale = sqrt( (option$k0 + 1)/(option$k0) * option$sigma0 ) # secondo me è giusta questa seconda ma prima era implementata l'altra
+  Prior_grid = GDFMM:::dnct(x = grid, n0 = option$nu0, mu0 = option$mu0, gamma0 = scale)
+  #cat("\n scale = ",scale,"\n variance = ",option$nu0/(option$nu0-2) * scale^2)
+
+  # This loop computes the predictive distribution over a grid
+  for(it in (burnin + 1):n_iter){
+
+     # Get sampled values
+     M_it <- fit$K[it]                        # get the number of clusters (allocated or not)
+     mu_it   <- fit$mu[[it]]                  # get the mean, (mu_{1}^{(it)}, ..., mu_{M}^{(it)})
+     sig2_it <- fit$sigma[[it]]               # get the variances, (sigma^2_{1}^{(it)}, ..., sigma^2_{M}^{(it)})
+     log_q_it <- fit$log_q[[it]][idx_group,]  # get the weights of required group
+
+    if(length(log_q_it)!=(M_it+1))
+      stop("Error in predictive_marginal, length of log_q_it must be M_it + 1")
+    # Kernel_grid is a  M_it x l_grid matrix, it contains the Normal kernels evauated over the grid
+    # Kernel_grid[m,i] = Norm(grid[i] | mu_{m}^{(it)}, sigma^2_{m}^{(it)})
+    Kernel_grid = t(sapply(1:M_it, simplify = "matrix",
+                     function(m){
+                         dnorm( x = grid, mean=mu_it[m], sd=sqrt(sig2_it[m]) )
+                     }
+                   ))
+
+    # Compute normalized weigths
+    log_stable_sum = log_stable_sum(log_q_it)
+    q = exp( log_q_it - log_stable_sum )
+    # Compute predicted density at iteration it
+    MIX[it-burnin,] <- q[M_it+1] * Prior_grid +  q[1:M_it] %*% Kernel_grid
+  }
+    # Density estimation and credible bounds
+  pred_est <- apply(MIX,2,quantile,prob=c(0.025,0.5,0.975))
+  return(pred_est)
+
+}
+
+
+
+
+#' predictive_marginal_all_groups
+#'
+#' This function computes the predictive distribution for all groups generated from the \code{\link{GDFMM_marginal_sampler}}.
+#' @inheritParams predictive
+#' @return [list] of length \code{d} where each element is the return object of \code{\link{predictive_marginal}}.
+#' @export
+predictive_marginal_all_groups <- function(grid, fit, option, burnin = 0){
+  d = nrow(fit$gamma)
+  lapply(1:d, predictive_marginal, grid = grid, fit = fit, option = option, burnin = burnin)
+}
+
+
+
+
+
+
+
+#' Compute_coclust_error
+#'
+#' This function computes the coclustering error and the coclustering error star.
+#' Being errors, low values are to be preferred and 1 is the maximum, worst, value.
+#' See Bassetti,Casarin et al. 2020 for proper definition
+#' @param real_partition [vector] of length \code{n}, the total number of points, containing the true cluster membership of each data point
+#' @param psm [matrix] of size \code{n x n} containing the posterior similarity matrix, i.e each element represents the relative frequency of two data points being assigned to the same cluster
+#'
+#' @return [list] \code{coclust_err} and \code{coclust_err_star}
+#' @export
+Compute_coclust_error = function(real_partition, psm){
+
+  Ndata = length(real_partition)
+
+  # Compute the true pairwise co-clustering matrix
+  expg = expand.grid(real_partition, real_partition)
+  expg$match = as.numeric(expg$Var1==expg$Var2)
+
+  coclust_true = matrix( expg$match,
+                         nrow = Ndata,
+                         ncol = Ndata,
+                         byrow = T
+  )
+
+  # Co-clustering error
+  coclust_error = (1/(Ndata^2)) * sum(abs(coclust_true - psm))
+
+  # Co-clustering error star
+  psm[psm<0.5]  = 0
+  psm[psm>=0.5] = 1
+  coclust_error_star = (1/(Ndata^2)) * sum(abs(coclust_true - psm))
+
+  return(  list("coclust_err"=coclust_error,
+                "coclust_err_star"=coclust_error_star)  )
+
+}
+
+
+#' Compute_L1_dist
+#'
+#' This function computes the L1 distance between the true density and the predictive density within each level
+#' and the mean value across all levels.
+#' Low values are to be preferred.
+#' @param Pred [list] the predictive distributions of all levels evaluated  \code{grid}
+#' @inheritParams simulate_data
+#' @inheritParams predictive
+#'
+#' @return [list] the first element, ??? , is a vector with the L1 error within each level.
+#' The second element, ???, is the mean value across all levels.
+#'
+#' @export
+#'
+#' @examples Compute_L1_dist(list(Pred_all[[1]][2,], Pred_all[[2]][2,]),mix_probs,mu,sd)
+Compute_L1_dist = function(Pred, p_mix, mu, sigma, grid ){
+
+  d = length(Pred)
+  K = length(mu)
+  L1_err = rep(0,d)
+
+  if(d != nrow(p_mix))
+    stop("Mismatch of dimensions. Pred must be a list of d elements,
+          p_mix must be a matrix with d rows")
+  if(K != length(sigma) || K != ncol(p_mix))
+    stop("Mismatch of dimensions. mu and sigma must be vector of length K.
+          p_mix must be a matrix with K columns")
+
+  # Evaluate the true densities over a grid of points
+  true_dens_eval = apply(p_mix, 1, FUN = function(x){
+    GDFMM::dmix(x = grid, w_j = x, mu_vec = mu, sigma_vec = sigma)
+  })
+
+
+  for(j in 1:d){
+
+    # Compute the absolute value of the differences between the true and the predicted densities
+    ydiff = abs( true_dens_eval[,j] - Pred[[j]] )
+    # Compute L1 distance
+    L1_err[j] = pracma::trapz(x = grid, y = ydiff)
+
+  }
+
+  return(  list( "L1err_per_level" = L1_err,
+                 "L1err_average" = mean(L1_err)
+               )
+         )
+
+}
+
+
+#' Handle input
+#'
+#' This function gets a tibble with three columns containing the data in long form. Data are handled and a list is returned.
+#' @param tb [tibble] a tibble with three columns. First column contains the ID of the data,
+#' second column contains the level membership of each data. Finally, the third column contains the numerical value of the variabile
+#' @param intercept [boolen] set \code{TRUE} to include the intercept in the regression model
+#' @export
+input_handle = function(tb, intercept = FALSE){
+
+  # set names
+  ncol_tb = ncol(tb)
+  r = ncol_tb - 4 # number of covariates
+  names(tb)[1:4] = c("ID","level","value","Partition0")
+  tb$level <- factor(tb$level, levels = unique(tb$level))
+  levels(tb$level) <- as.character(1:length(unique(tb$level)))
+
+  if(r > 0)
+    cov_names = names(tb)[5:ncol_tb]
+
+  tb = tb %>% ungroup()
+  IDs  = tb %>% distinct(ID) %>% pull(ID)
+  # compute number of individuals in each level
+  n_j = tb %>% distinct(ID,level) %>%
+               group_by(level) %>%
+               summarise(count = n()) %>%
+               pull(count)
+
+  # compute number of levels
+  d = length(n_j)
+
+  # compute number of individuals
+  n = tb %>% group_by(ID) %>%
+             summarise(n()) %>%
+             nrow()
+
+  # compute quantities for each individual i in level j
+  N_ji = matrix(0,nrow = d, ncol = n) # number of observations for individual i in level j
+  mean_ji = matrix(0,nrow = d, ncol = n) # mean of observations for individual i in level j
+  var_ji  = matrix(0,nrow = d, ncol = n) # variance of observations for individual i in level j
+  #s_i  = rep(0,n) # number of levels in which individual i apprears
+
+  data = vector("list", length = d) # list containing all observed values, for each level and for each individual
+  data = lapply(1:d, FUN = function(s){data[[s]] = vector("list", length = n) })
+
+  cov_list = vector("list", length = d) # list containing all covariates, for each level and for each individual
+  cov_list = lapply(1:d, FUN = function(s){cov_list[[s]] = vector("list", length = n) })
+
+  initial_partition = vector("list", length = d)
+  initial_partition = lapply(1:d, FUN = function(s){initial_partition[[s]] = vector("list", length = n) })
+
+  if(r > 0)
+    formula <- as.formula( paste("value ~ ", paste(cov_names, collapse = "+")) )
+  if(intercept)
+    r = r+1
+  for(i in 1:n) {
+    filter_i = tb %>% filter(ID == IDs[i]) # filter for i-th individual
+
+              ### compute mean-var-number of observations for i-th individual in all d levels
+              ##temp_i = filter_i %>% group_by(level) %>%
+                ##summarise(count = n(), mean = mean(value), var = var(value)) %>%
+                ##select(count, mean, var,level) %>% mutate(level = as.integer(level)) %>% as.matrix()
+          ##
+              ##temp_i[is.na(temp_i[,3]),3] = 0
+              ##s_i[i] = nrow(temp_i)
+          ##
+              ### save
+              ##N_ji[as.numeric(temp_i[,4]),i]    = as.numeric(temp_i[,1])
+              ##mean_ji[as.numeric(temp_i[,4]),i] = as.numeric(temp_i[,2])
+              ##var_ji[as.numeric(temp_i[,4]),i]  = as.numeric(temp_i[,3])
+
+    # fill data structure
+    for(j in 1:d){
+      temp_ji = filter_i %>% filter(level == j)
+      data_ji = temp_ji %>% pull(value) # get all observation for individual i in all d levels
+      data[[j]][[i]] = data_ji
+      N_ji[j,i] = length(data_ji) # compute number of observations
+
+      if(N_ji[j,i] > 0)
+        mean_ji[j,i] = mean(data_ji) # compute mean
+
+      # compute variance, if not defined set 0
+      if(N_ji[j,i] > 1)
+        var_ji[j,i] = var(data_ji)
+
+      # get design matrix for observation i in level j
+      if(r > 0){
+        if(N_ji[j,i] == 0){
+          cov_list[[j]][[i]] = NA
+        }else{
+          if(intercept)
+            covariates = model.matrix( formula, data = temp_ji )
+          else
+            covariates = model.matrix( formula, data = temp_ji )[,-1]
+
+          cov_list[[j]][[i]] = matrix(covariates, nrow = N_ji[j,i], ncol = r)
+        }
+        #else{
+          #cov_list[[j]][[i]] = model.matrix( formula, data = temp_ji )[,-1]
+        #}
+      }
+
+      # set initial partition
+      if(nrow(temp_ji)>0)
+        initial_partition[[j]][[i]] = temp_ji$Partition0[1]
+
+    }
+
+  }
+  if(r == 0)
+    cov_list = NULL
+  return( list("n"=n,
+               "d"=d,
+               "r"=r,
+               "n_j"=n_j,
+               "ID_i" = as.character(IDs),
+               "observations"=data,#"s_i"=s_i,
+               "covariates" = cov_list,
+               "N_ji"=N_ji,
+               "mean_ji"=mean_ji,
+               "var_ji"=var_ji,
+               "initialPartition" = initial_partition)
+        )
+
+}
+
+
+#' Conditional Sampler: function to run the GDFMM model. There is the possibility to fix
+#'                      the partition, passing TRUE to FixPartition and specifying the
+#'                      partion in the option. Default prior for P0 is an inverse gamma
+#'
+#' @param data [tibble], the input data. This must be the return object of \code{\link{handle_input}}
+#' @param niter [integer], the number of iterations
+#' @param burnin [integer], the burnin period
+#' @param thin [integer], the thinning value
+#' @param seed [integer], the seed for GSL random engine (0 ==> random seed)
+#' @param P0.prior [string] with the prior to be used as P0
+#' @param FixPartition TRUE if we want to fix the partition
+#' @param option [list] the output of \code{\link{set_options}} function
+#' @export
+ConditionalSampler <- function(data, niter, burnin, thin, seed,
+                               P0.prior = "Normal-InvGamma", FixPartition = F, algorithm = "Neal2", option = NULL) {
+
+  # check input data
+  names_data_input = c("n","d","r","n_j","ID_i","observations","covariates","N_ji","mean_ji","var_ji","initialPartition")
+  if(length(data) != length(names_data_input))
+    stop("data input is malformed. Its length is not the expected one. Use set_options() function to set it correctely.")
+  if(!all(names(data) == names_data_input ))
+    stop("data input parameter is malformed. The names are not the expected ones. Use set_options() function to set them correctely.")
+
+  # get number of observations that will be clustered
+  nobs = sum(data$n_j)
+
+  #get number of individuals
+  n = data$n
+
+  #Check option to be in the correct form
+  option_temp = set_options(partition = NULL)
+  if(is.null(option)) # no option, set default
+    option = option_temp
+
+  if(length(option) != length(option_temp))
+    stop("option parameter is malformed. Its length is not the expected one. Use set_options() function to set it correctely.")
+  if(!all(names(option) == names(option_temp) ))
+    stop("option parameter is malformed. The names are not the expected ones. Use set_options() function to set them correctely.")
+
+  #Check partiton
+  if(is.null(option$partition)){ # set empty partition
+    if(FixPartition)
+        stop("If FixPartition is selected, a partition must be provided in option$partition")
+    option$partition = rep(0,n)
+  }else{
+    cat("\n Check that provided partition is well formed. It must start from 0 and all values must be contiguous \n")
+    option$partition = arrange_partition(option$partition)
+
+    # check that partiton and data are coherent
+    if(nobs != length(option$partition))
+      stop("The number of points in the data is not coherent with the length of the partition. Are there missing values in the data? Such implementation is not able to deal with them")
+  }
+
+  # Check initial values for gamma0
+  if(is.null(option$gamma0))
+    option$gamma0 = rep(1,data$d)
+  if(length(option$gamma0) != data$d)
+    stop("option$gamma0 must be a vector of length d")
+  if(any(option$gamma0 <= 0 ))
+    stop("All elements of option$gamma0 must be strictly positive")
+
+
+  # Check initial values for tau
+  K_init = length(table(option$partition)) # compute initial number of clusters
+  if(is.null(option$init_var_cluster))
+    option$init_var_cluster = 1/rgamma(n=K_init+option$Mstar0,
+                                       shape = option$nu0/2,
+                                       rate  = option$nu0*option$sigma0/2 )
+  if(length(option$init_var_cluster)!=K_init+option$Mstar0)
+    stop("The length of option$init_var_cluster must be equal to the initial number of clusters deduced from the initial partition plus Mstar0 ")
+  if(is.null(option$init_mean_cluster))
+    option$init_mean_cluster = rnorm(n=K_init+option$Mstar0,
+                                     option$mu0, sqrt(option$init_var_cluster/option$k0))
+  if(length(option$init_mean_cluster)!=K_init+option$Mstar0)
+    stop("The length of option$init_mean_cluster must be equal to the initial number of clusters deduced from the initial partition plus Mstar0")
+
+  # Check proposal for Mstar
+  option$proposal_Mstar = floor(option$proposal_Mstar)
+  if(option$proposal_Mstar <= 0)
+    stop("proposal_Mstar must be a strictly positive integer")
+
+  # check covariates
+  if(option$IncludeCovariates)
+  {
+    r = data$r
+    if(length(option$beta0)!= r || nrow(option$Sigma0) != r || ncol(option$Sigma0) != r  )
+      stop("The number of covariates r that is defined in data is not coherent with the size of beta0 or Sigma0 provided in options.")
+    if(  min(eigen(option$Sigma0)$values) <= 1e-14  )
+      stop("Sigma0 is not positive definite or it is very ill conditioned.")
+  }else{
+    if(data$r != 0 )
+      warning(" option$IncludeCovariates is set to FALSE but r > 0 ")
+  }
+
+  #check algorithm
+  if( !(algorithm == "Neal2" || algorithm == "Neal3") )
+    stop("algorithm can only be equal to Neal2 or Neal3")
+
+  return( GDFMM:::MCMC_conditional_c(data, niter, burnin, thin, seed, P0.prior, FixPartition, algorithm, option) )
+}
+
+
+
+
+
+#' predictive_players
+#'
+#' This function computes the predictive distribution for player \code{ID_ply} generated from \code{\link{ConditionalSampler}}
+#' @param ID_ply [integer] the index of the player of interest.
+#' @param dt [list] This must be the return object of \code{\link{handle_input}}. The Clustering must be added as well
+#' @param fit [list] the output of a conditional sampler, \code{\link{GDFMM_sampler}} or \code{\link{ConditionalSampler}}
+#' @param burnin [integer] the number of draws from \code{\link{GDFMM_sampler}} that must be discarded.
+#'
+#' @return [matrix] of size ?? containing the quantiles of level \code{0.025,0.5,0.975}.
+#' @export
+predictive_players = function(ID_ply, dt, fit, burnin = 1){
+
+  idx_player = which(dt$ID_i == ID_ply)
+  n_iter <- length(fit$mu) #number of iterations
+  d_i = sum( dt$N_ji[,idx_player] != 0 )
+  #res = matrix(0, nrow = 3, ncol = sum(dt$N_ji[,idx_player]))
+  IncludeCovariates = TRUE
+  if(length(fit$beta) == 0)
+    IncludeCovariates = FALSE
+
+  res = c()
+  for(idx_group in 1:d_i){
+
+    Nsi = dt$N_ji[idx_group, idx_player]
+    Ysi = dt$observations[[idx_group]][[idx_player]]
+
+    if(IncludeCovariates)
+      Xsi = dt$covariates[[idx_group]][[idx_player]]
+    else
+      Xsi = matrix(0,nrow = Nsi, ncol = 1)
+
+    MIX = rep(0,length(burnin:n_iter))
+
+    counter = 1
+    for(it in burnin:n_iter){
+
+      if(IncludeCovariates)
+        beta_it = fit$beta[[it]][idx_group,]    # get (beta_{j,1}^(it), ..., beta_{j,r}^(it))
+      else
+        beta_it = c(0)
+
+      # chose from the component to sampler from
+      m = dt$Clustering[[idx_group]][[idx_player]][it]
+
+      # compute the mean for this player in this specific season
+      mean = fit$mu[[it]][m] + Xsi %*% beta_it
+      mean_it = sum(mean)/Nsi
+      ypred_it = rnorm(n = 1, mean = mean, sd = sqrt(fit$sigma[[it]][m]) )
+      # save
+      MIX[counter] = ypred_it
+
+      # update row counter
+      counter = counter + 1
+    }
+    res = rbind(res, quantile( MIX, prob=c(0.025,0.5,0.975)) )
+  }
+  return(res)
+}
+
+#' @export
+compute_LMPL = function(dt, fit, burnin = 1){
+
+  n_iter <- length(fit$mu) #number of iterations
+  res = 0
+  for(s in 1:dt$d){
+    for(i in 1:dt$n){
+
+      Nsi = dt$N_ji[s,i]
+      if(Nsi == 0)
+        break
+      Xsi = dt$covariates[[s]][[i]]
+      Ysi = dt$observations[[s]][[i]]
+
+      counter = 1
+      a = rep(0,length(burnin:niter))
+      for(it in burnin:n_iter){
+        # Get sampled values
+        M_it  = length(fit$mu[[it]]) # compute the number of components (allocated or not)
+        S_it = fit$S[[it]][s,]    # get (S_{j,1}^(it), ..., S_{j,M}^(it)), where j is idx_group and M is M_it
+        T_it = sum(S_it)
+        beta_it = fit$beta[[it]][s,]    # get (beta_{j,1}^(it), ..., beta_{j,r}^(it))
+        mu_it = fit$mu[[it]]
+        sigma_it = fit$sigma[[it]]
+
+        log_f_it = 0
+        for(m in 1:M_it){
+          mean = mu_it[m]*rep(1,Nsi) + Xsi %*% beta_it # compute the mean vector, it should have length Nsi
+          log_f_it = log(S_it[m]/T_it) + mvtnorm::dmvnorm( x = Ysi, mean = mean, sigma = sigma_it[m]*diag(Nsi), log = TRUE )
+        }
+        a[counter] = -log_f_it
+        counter = counter + 1
+      }
+
+      res = res - log_stable_sum(a,is_log = TRUE)
+
+    }
+  }
+  res + sum(dt$n_j)*log(niter-burnin)
+}
+
+#' predictive_players_fix_partition
+#'
+#' This function computes the predictive distribution for player \code{ID_ply} generated from \code{\link{ConditionalSampler}}
+#' This function is specific for the case where the partition was kept fixed
+#' @param ID_ply [integer] the index of the player of interest.
+#' @param dt [list] This must be the return object of \code{\link{handle_input}}. The Clustering must be added as well
+#' @param fit [list] the output of a conditional sampler, \code{\link{GDFMM_sampler}} or \code{\link{ConditionalSampler}}
+#' @param burnin [integer] the number of draws from \code{\link{GDFMM_sampler}} that must be discarded.
+#'
+#' @return [matrix] of size ?? containing the quantiles of level \code{0.025,0.5,0.975}.
+#' @export
+predictive_players_fix_partition = function(ID_ply, dt, fit, burnin = 1, data_med4season){
+
+  idx_player = which(dt$ID_i == ID_ply)
+  n_iter <- length(fit$mu) #number of iterations
+  d_i = sum( dt$N_ji[,idx_player] != 0 )
+  partition = data_med4season %>% filter(ID == ID_ply) %>%
+                distinct(SeasonNumber, .keep_all=T) %>% pull(Clustering)
+  IncludeCovariates = TRUE
+  if(length(fit$beta) == 0)
+    IncludeCovariates = FALSE
+
+  res = c()
+  for(idx_group in 1:d_i){
+
+    Nsi = dt$N_ji[idx_group, idx_player]
+    Ysi = dt$observations[[idx_group]][[idx_player]]
+
+
+    if(IncludeCovariates)
+      Xsi = dt$covariates[[idx_group]][[idx_player]]
+    else
+      Xsi = matrix(0,nrow = Nsi, ncol = 1)
+
+    MIX = matrix(0,nrow = length(burnin:n_iter), ncol = Nsi)
+
+    counter = 1
+    for(it in burnin:n_iter){
+
+      if(IncludeCovariates)
+        beta_it = fit$beta[[it]][idx_group,]    # get (beta_{j,1}^(it), ..., beta_{j,r}^(it))
+      else
+        beta_it = c(0)
+
+      # chose from the component to sampler from
+      m = partition[idx_group]
+
+      # draw from multivariate gaussian
+      mean = fit$mu[[it]][m] + Xsi %*% beta_it # compute the mean vector, it should have length Nsi
+      ypred_it = rnorm(n = Nsi, mean = mean, sd = rep( sqrt(fit$sigma[[it]][m]) , Nsi))
+
+      # save
+      MIX[counter, ] = ypred_it
+
+      # update row counter
+      counter = counter + 1
+    }
+    res = cbind(res, apply(MIX, 2, quantile, prob=c(0.025,0.5,0.975)) )
+  }
+  return(res)
+}
+
+
