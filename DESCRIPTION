@@ -1,0 +1,27 @@
+Package: GDFMM
+Type: Package
+Title: Hierarchical Mixture of Finite MIxtures
+Version: 0.1.0
+Author: Authors@R: person("Alessandro", "Colombi", email = "a.colombi10@campus.unimib.it",
+  role = c("aut", "cre"))
+Maintainer: Alessandro Colombi <a.colombi10@campus.unimib.it>
+Description: A package to fit Mixture of Finite Mixtures with random number of components to hierarchical continuous data
+License: GPL (>= 3)
+Encoding: UTF-8
+LazyData: true
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.2.3
+RdMacros: mathjaxr
+LinkingTo: 
+    Rcpp (>= 1.0.7),
+    RcppArmadillo (>= 0.10.7.5.0),
+    RcppEigen (>= 0.3.3.9.1),
+    RcppParallel (>= 5.1.4),
+    RcppProgress,
+    RcppGSL
+Imports:
+    mathjaxr (>= 1.4-0),
+    Rcpp,
+    RcppGSL
+Depends: 
+    R (>= 2.10)
